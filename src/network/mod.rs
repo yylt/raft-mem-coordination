@@ -1,4 +1,5 @@
 pub mod api;
+pub mod coordinate;
 pub mod management;
 pub mod raft;
 mod raft_network_impl;

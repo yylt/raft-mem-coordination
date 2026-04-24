@@ -4,22 +4,11 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use actix_web::middleware;
-use actix_web::middleware::Logger;
-use actix_web::web::Data;
-use actix_web::HttpServer;
 use openraft::Config;
-
-use crate::app::App;
-use crate::network::api;
-use crate::network::management;
-use crate::network::raft;
-use crate::network::Network;
-use crate::store::Request;
-use crate::store::Response;
 
 pub mod app;
 pub mod client;
+pub mod config;
 pub mod network;
 pub mod store;
 #[cfg(test)]
@@ -30,8 +19,8 @@ pub type NodeId = u64;
 openraft::declare_raft_types!(
     /// Declare the type configuration for example K/V store.
     pub TypeConfig:
-        D = Request,
-        R = Response,
+        D = store::Request,
+        R = store::Response,
 );
 
 pub type LogStore = store::LogStore;
@@ -55,8 +44,15 @@ pub mod typ {
     pub type ClientWriteResponse = openraft::raft::ClientWriteResponse<TypeConfig>;
 }
 
-pub async fn start_example_raft_node(node_id: NodeId, http_addr: String) -> std::io::Result<()> {
-    // Create a configuration for the raft instance.
+use crate::app::App;
+use crate::config::Config as AppConfig;
+use crate::network::Network;
+
+/// Create App instance from config
+pub async fn create_app(app_config: AppConfig) -> Arc<App> {
+    let node_id = app_config.id;
+    let http_addr = app_config.addr.clone();
+
     let config = Config {
         heartbeat_interval: 500,
         election_timeout_min: 1500,
@@ -66,16 +62,11 @@ pub async fn start_example_raft_node(node_id: NodeId, http_addr: String) -> std:
 
     let config = Arc::new(config.validate().unwrap());
 
-    // Create a instance of where the Raft logs will be stored.
     let log_store = LogStore::default();
-    // Create a instance of where the Raft data will be stored.
     let state_machine_store = Arc::new(StateMachineStore::default());
 
-    // Create the network layer that will connect and communicate the raft instances and
-    // will be used in conjunction with the store created above.
     let network = Network {};
 
-    // Create a local raft instance.
     let raft = openraft::Raft::new(
         node_id,
         config.clone(),
@@ -86,40 +77,24 @@ pub async fn start_example_raft_node(node_id: NodeId, http_addr: String) -> std:
     .await
     .unwrap();
 
-    // Create an application that will store all the instances created above, this will
-    // later be used on the actix-web services.
-    let app_data = Data::new(App {
+    Arc::new(App {
         id: node_id,
-        addr: http_addr.clone(),
+        addr: http_addr,
         raft,
         log_store,
         state_machine_store,
         config,
-    });
+        app_config,
+    })
+}
 
-    // Start the actix-web server.
-    let server = HttpServer::new(move || {
-        actix_web::App::new()
-            .wrap(Logger::default())
-            .wrap(Logger::new("%a %{User-Agent}i"))
-            .wrap(middleware::Compress::default())
-            .app_data(app_data.clone())
-            // raft internal RPC
-            .service(raft::append)
-            .service(raft::snapshot)
-            .service(raft::vote)
-            // admin API
-            .service(management::init)
-            .service(management::add_learner)
-            .service(management::change_membership)
-            .service(management::metrics)
-            // application API
-            .service(api::write)
-            .service(api::read)
-            .service(api::consistent_read)
-    });
-
-    let x = server.bind(http_addr)?;
-
-    x.run().await
+/// Load TLS config from cert and key files
+pub fn load_tls_config(cert_file: &str, key_file: &str) -> std::io::Result<openssl::ssl::SslAcceptorBuilder> {
+    let mut builder = openssl::ssl::SslAcceptor::mozilla_intermediate_v5(openssl::ssl::SslMethod::tls())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    builder.set_certificate_chain_file(cert_file)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    builder.set_private_key_file(key_file, openssl::ssl::SslFiletype::PEM)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    Ok(builder)
 }

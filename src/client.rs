@@ -14,9 +14,9 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::time::timeout;
 
+use crate::store::Request;
 use crate::typ;
 use crate::NodeId;
-use crate::Request;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Empty {}
