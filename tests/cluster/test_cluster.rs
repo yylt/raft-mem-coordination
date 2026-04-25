@@ -5,20 +5,43 @@ use std::panic::PanicInfo;
 use std::thread;
 use std::time::Duration;
 
-use maplit::btreemap;
-use maplit::btreeset;
+use actix_web::middleware;
+use actix_web::middleware::Logger;
+use actix_web::web::Data;
+use actix_web::HttpServer;
+use maplit::{btreemap, btreeset};
 use openraft::BasicNode;
+use raft_mem_coordination::app::App;
 use raft_mem_coordination::client::ExampleClient;
 use raft_mem_coordination::config::Config;
 use raft_mem_coordination::create_app;
-use raft_mem_coordination::load_tls_config;
-use raft_mem_coordination::network::api;
-use raft_mem_coordination::network::coordinate;
-use raft_mem_coordination::network::management;
-use raft_mem_coordination::network::raft;
+use raft_mem_coordination::k8s::coordinate;
 use raft_mem_coordination::store::Request;
 use tokio::runtime::Runtime;
 use tracing_subscriber::EnvFilter;
+
+async fn start_example_raft_node(node_id: u64, addr: String) -> anyhow::Result<()> {
+    let app_config = Config::from_params(node_id, addr.clone());
+    let app_data = Data::new(create_app(app_config).await);
+
+    thread::spawn(move || {
+        let rt = Runtime::new().unwrap();
+        let server = HttpServer::new(move || {
+            actix_web::App::new()
+                .wrap(Logger::default())
+                .wrap(Logger::new("%a %{User-Agent}i"))
+                .wrap(middleware::Compress::default())
+                .app_data(app_data.clone())
+                .configure(App::configure_public)
+                .configure(App::configure_private)
+        })
+        .bind(addr)
+        .unwrap();
+
+        rt.block_on(server.run()).unwrap();
+    });
+    Ok(())
+}
 
 #[allow(deprecated)]
 pub fn log_panic(panic: &PanicInfo) {

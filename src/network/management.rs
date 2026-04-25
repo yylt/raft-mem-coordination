@@ -13,6 +13,14 @@ use openraft::RaftMetrics;
 use crate::app::App;
 use crate::NodeId;
 
+fn resolve_peer_addr(app: &App, node_id: NodeId, addr: String) -> String {
+    app.app_config
+        .peer_addr
+        .get(&node_id)
+        .map(|addrs| addrs.join(";"))
+        .unwrap_or(addr)
+}
+
 // --- Cluster management
 
 /// Add a node as **Learner**.
@@ -23,7 +31,7 @@ use crate::NodeId;
 #[post("/add-learner")]
 pub async fn add_learner(app: Data<App>, req: Json<(NodeId, String)>) -> actix_web::Result<impl Responder> {
     let node_id = req.0 .0;
-    let node = BasicNode { addr: req.0 .1.clone() };
+    let node = BasicNode { addr: resolve_peer_addr(&app, node_id, req.0 .1.clone()) };
     let res = app.raft.add_learner(node_id, node, true).await;
     Ok(Json(res))
 }
@@ -44,7 +52,7 @@ pub async fn init(app: Data<App>, req: Json<Vec<(NodeId, String)>>) -> actix_web
         nodes.insert(app.id, BasicNode { addr: app.addr.clone() });
     } else {
         for (id, addr) in req.0.into_iter() {
-            nodes.insert(id, BasicNode { addr });
+            nodes.insert(id, BasicNode { addr: resolve_peer_addr(&app, id, addr) });
         }
     };
     let res = app.raft.initialize(nodes).await;

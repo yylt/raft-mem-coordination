@@ -2,48 +2,39 @@ use actix_web::post;
 use actix_web::web;
 use actix_web::web::Data;
 use actix_web::Responder;
+use openraft::error::CheckIsLeaderError;
+use openraft::error::Infallible;
+use openraft::error::RaftError;
+use openraft::BasicNode;
+use web::Json;
 
 use crate::app::App;
+use crate::store::Request;
+use crate::NodeId;
 
-/// K8s coordinate resource API
-/// These endpoints handle coordinate CRUD operations without auth
-#[post("/coordinates")]
-pub async fn list_coordinates(app: Data<App>) -> actix_web::Result<impl Responder> {
-    let state_machine = app.state_machine_store.state_machine.read().await;
-    let coordinates: Vec<String> = state_machine.data.keys().cloned().collect();
-    Ok(web::Json(coordinates))
+/**
+ * Application API
+ */
+#[post("/write")]
+pub async fn write(app: Data<App>, req: Json<Request>) -> actix_web::Result<impl Responder> {
+    let response = app.raft.client_write(req.0).await;
+    Ok(Json(response))
 }
 
-#[post("/coordinate/{key}")]
-pub async fn get_coordinate(
-    app: Data<App>,
-    key: web::Path<String>,
-) -> actix_web::Result<impl Responder> {
-    let state_machine = app.state_machine_store.state_machine.read().await;
-    let value = state_machine.data.get(key.as_str()).cloned();
-    Ok(web::Json(value))
-}
+#[post("/read")]
+pub async fn read(app: Data<App>, req: Json<String>) -> actix_web::Result<impl Responder> {
+    let ret = app.raft.ensure_linearizable().await;
 
-#[post("/coordinate")]
-pub async fn create_coordinate(
-    app: Data<App>,
-    req: web::Json<(String, String)>,
-) -> actix_web::Result<impl Responder> {
-    let (key, value) = req.0;
-    let request = crate::store::Request::Set { key, value };
-    let response = app.raft.client_write(request).await;
-    Ok(web::Json(response))
-}
+    match ret {
+        Ok(_) => {
+            let state_machine = app.state_machine_store.state_machine.read().await;
+            let key = req.0;
+            let value = state_machine.data.get(&key).cloned();
 
-#[post("/coordinate/{key}/delete")]
-pub async fn delete_coordinate(
-    app: Data<App>,
-    key: web::Path<String>,
-) -> actix_web::Result<impl Responder> {
-    let request = crate::store::Request::Set {
-        key: key.to_string(),
-        value: String::new(),
-    };
-    let response = app.raft.client_write(request).await;
-    Ok(web::Json(response))
+            let res: Result<String, RaftError<NodeId, CheckIsLeaderError<NodeId, BasicNode>>> =
+                Ok(value.unwrap_or_default());
+            Ok(Json(res))
+        }
+        Err(e) => Ok(Json(Err(e))),
+    }
 }

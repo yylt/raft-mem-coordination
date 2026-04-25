@@ -14,14 +14,40 @@ use openraft::raft::VoteResponse;
 use openraft::BasicNode;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::time::Duration;
 
 use crate::typ;
 use crate::NodeId;
 use crate::TypeConfig;
 
-pub struct Network {}
+#[derive(Clone, Copy)]
+pub struct Network {
+    pub(crate) use_https: bool,
+}
 
 impl Network {
+    fn target_addrs(target_node: &BasicNode) -> Vec<&str> {
+        let addrs: Vec<&str> = target_node
+            .addr
+            .split(';')
+            .filter(|addr| !addr.is_empty())
+            .collect();
+
+        if addrs.is_empty() {
+            vec![target_node.addr.as_str()]
+        } else {
+            addrs
+        }
+    }
+
+    fn scheme(&self) -> &'static str {
+        if self.use_https {
+            "https"
+        } else {
+            "http"
+        }
+    }
+
     pub async fn send_rpc<Req, Resp, Err>(
         &self,
         target: NodeId,
@@ -34,29 +60,49 @@ impl Network {
         Err: std::error::Error + DeserializeOwned,
         Resp: DeserializeOwned,
     {
-        let addr = &target_node.addr;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .danger_accept_invalid_certs(true)
+            .build()
+            .map_err(|e| openraft::error::RPCError::Network(NetworkError::new(&e)))?;
 
-        let url = format!("http://{}/{}", addr, uri);
-        tracing::debug!("send_rpc to url: {}", url);
+        let addrs = Self::target_addrs(target_node);
+        let mut last_err = None;
 
-        let client = reqwest::Client::new();
-        tracing::debug!("client is created for: {}", url);
+        for (idx, addr) in addrs.iter().enumerate() {
+            let url = format!("{}://{}/{}", self.scheme(), addr, uri);
+            tracing::debug!("send_rpc to url: {}", url);
 
-        let resp = client.post(url).json(&req).send().await.map_err(|e| {
-            // If the error is a connection error, we return `Unreachable` so that connection isn't retried
-            // immediately.
-            if e.is_connect() {
-                return openraft::error::RPCError::Unreachable(Unreachable::new(&e));
-            }
-            openraft::error::RPCError::Network(NetworkError::new(&e))
-        })?;
+            let resp = match client.post(url.clone()).json(&req).send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    let err = if e.is_connect() {
+                        openraft::error::RPCError::Unreachable(Unreachable::new(&e))
+                    } else {
+                        openraft::error::RPCError::Network(NetworkError::new(&e))
+                    };
 
-        tracing::debug!("client.post() is sent");
+                    last_err = Some(err);
+                    if idx + 1 < addrs.len() {
+                        continue;
+                    }
 
-        let res: Result<Resp, Err> =
-            resp.json().await.map_err(|e| openraft::error::RPCError::Network(NetworkError::new(&e)))?;
+                    return Err(last_err.take().expect("last error must exist"));
+                }
+            };
 
-        res.map_err(|e| openraft::error::RPCError::RemoteError(RemoteError::new(target, e)))
+            tracing::debug!("client.post() is sent");
+
+            let res: Result<Resp, Err> = resp
+                .json()
+                .await
+                .map_err(|e| openraft::error::RPCError::Network(NetworkError::new(&e)))?;
+
+            return res
+                .map_err(|e| openraft::error::RPCError::RemoteError(RemoteError::new(target, e)));
+        }
+
+        Err(last_err.expect("send_rpc requires at least one address"))
     }
 }
 
@@ -67,7 +113,7 @@ impl RaftNetworkFactory<TypeConfig> for Network {
 
     async fn new_client(&mut self, target: NodeId, node: &BasicNode) -> Self::Network {
         NetworkConnection {
-            owner: Network {},
+            owner: *self,
             target,
             target_node: node.clone(),
         }
@@ -86,7 +132,9 @@ impl RaftNetwork<TypeConfig> for NetworkConnection {
         req: AppendEntriesRequest<TypeConfig>,
         _option: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, typ::RPCError> {
-        self.owner.send_rpc(self.target, &self.target_node, "raft-append", req).await
+        self.owner
+            .send_rpc(self.target, &self.target_node, "raft-append", req)
+            .await
     }
 
     async fn install_snapshot(
@@ -94,7 +142,9 @@ impl RaftNetwork<TypeConfig> for NetworkConnection {
         req: InstallSnapshotRequest<TypeConfig>,
         _option: RPCOption,
     ) -> Result<InstallSnapshotResponse<NodeId>, typ::RPCError<InstallSnapshotError>> {
-        self.owner.send_rpc(self.target, &self.target_node, "raft-snapshot", req).await
+        self.owner
+            .send_rpc(self.target, &self.target_node, "raft-snapshot", req)
+            .await
     }
 
     async fn vote(
@@ -102,6 +152,8 @@ impl RaftNetwork<TypeConfig> for NetworkConnection {
         req: VoteRequest<NodeId>,
         _option: RPCOption,
     ) -> Result<VoteResponse<NodeId>, typ::RPCError> {
-        self.owner.send_rpc(self.target, &self.target_node, "raft-vote", req).await
+        self.owner
+            .send_rpc(self.target, &self.target_node, "raft-vote", req)
+            .await
     }
 }
